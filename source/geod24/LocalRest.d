@@ -72,6 +72,12 @@ private struct ArgWrapper (T...)
     T args;
 }
 
+void terminate (Node, API)(API api)
+{
+    auto remote_api = cast(RemoteAPI!(API, Node))api;
+    remote_api.__terminate();
+}
+
 /// Ditto
 public final class RemoteAPI (API, Implementation : API) : API
 {
@@ -343,7 +349,12 @@ unittest
         node1.recv(Json.init);
         assert(node1.last() == "recv@1");
         assert(node2.last() == "pubkey");
+
+        terminate!Node(node1);
+        terminate!Node(node2);
     }
 
-    auto testerFiber = spawn(&testFunc);
+    import core.thread;
+    auto testerThread = spawn(&testFunc);
+    thread_joinAll();
 }
