@@ -131,6 +131,11 @@ public final class RemoteAPI (API, Implementation : API) : API
                                     break SWITCH;
                                 }.format(member, ovrld.mangleof));
                         }
+
+                case "__terminate":
+                    terminated = true;
+                    break;
+
                 default:
                     assert(0, "Unmatched method name: " ~ cmd.method);
                 }
@@ -138,8 +143,8 @@ public final class RemoteAPI (API, Implementation : API) : API
 
         while (!terminated)
         {
-            receive((OwnerTerminated e) { terminated = true; },
-                    handler);
+            receive(
+                (OwnerTerminated e) { terminated = true; }, handler);
         }
     }
 
@@ -223,6 +228,14 @@ public final class RemoteAPI (API, Implementation : API) : API
                 }
                 });
         }
+
+    public void __terminate ( )
+    {
+        () @trusted {
+            auto terminate = Command(thisTid(), "__terminate");
+            this.childTid.send(terminate);
+        }();
+    }
 }
 
 /// Simple usage example
@@ -252,6 +265,7 @@ unittest
 
     scope test = new RemoteAPI!(API, MockAPI)();
     assert(test.pubkey() == 42);
+    test.__terminate();
 }
 
 /// In a real world usage, users will most likely need to use the registry
