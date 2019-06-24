@@ -114,9 +114,9 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args)
+    public static RemoteAPI!(API) spawn (Impl, string start_func = "") (CtorParams!Impl args)
     {
-        auto childTid = .spawn(&spawned!(Impl), args);
+        auto childTid = .spawn(&spawned!(Impl, start_func), args);
         return new RemoteAPI(childTid, true);
     }
 
@@ -145,12 +145,17 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static void spawned (Implementation) (CtorParams!Implementation cargs)
+    private static void spawned (Implementation, string start_func) (CtorParams!Implementation cargs )
     {
         import std.format;
 
         bool terminated = false;
         scope node = new Implementation(cargs);
+
+        if (start_func != "")
+        {
+            mixin("node." ~ start_func ~ "();");
+        }
 
         scope handler = (Command cmd) {
             SWITCH:
