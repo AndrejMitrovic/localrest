@@ -72,6 +72,15 @@ private struct ArgWrapper (T...)
     T args;
 }
 
+// Used for lookups of a thread ID => API
+// note: must be an Object because 'API' is undefined here
+// note: must be outside the RemoteAPI class because it's templated,
+// and therefore each instance of the template creates a unique global object!!
+__gshared Object[Tid] _tid_to_api;
+// hashmaps don't have a Monitor so we use a separate object for locking
+__gshared Object _mutex;
+shared static this() { _mutex = new Object; }
+
 /*******************************************************************************
 
     A reference to an alread-instantiated node
@@ -196,6 +205,7 @@ public final class RemoteAPI (API) : API
 
         bool terminated = false;
         scope node = new Implementation(cargs);
+        synchronized (_mutex) _tid_to_api[thisTid] = node;
 
         while (!terminated)
         {
@@ -262,7 +272,35 @@ public final class RemoteAPI (API) : API
                     // this overload needs to be
                     auto res = () @trusted {
                         this.childTid.send(command);
-                        return receiveOnly!(Response);
+
+                        bool resp_received;
+                        Response the_response;
+
+                        // we might receive another command back while awaiting the response.
+                        // in that case, run the command which was received and keep awaiting
+                        // for the original response
+                        while (!resp_received)
+                        {
+                            receive(
+                                (Command cmd)
+                                {
+                                    synchronized (_mutex)  // todo: is this necessary?
+                                    {
+                                        auto node = cast(API)_tid_to_api[childTid];
+                                        assert(node !is null);
+                                        handleCommand(cmd, node);
+                                    }
+                                },
+                                (Response response)
+                                {
+                                    // we received a response, done receiving
+                                    resp_received = true;
+                                    the_response = response;
+                                }
+                            );
+                        }
+
+                        return the_response;
                     }();
                     if (!res.success)
                         throw new Exception(res.data);
