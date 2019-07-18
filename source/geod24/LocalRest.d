@@ -41,11 +41,23 @@ import vibe.data.json;
 
 static import C = std.concurrency;
 import std.meta : AliasSeq;
-import std.traits : Parameters, ReturnType;
+import std.traits : getUDAs, Parameters, ReturnType;
 
 import core.thread;
 import core.time;
 
+class TimeoutException : Exception
+{
+    @safe pure nothrow this(string msg, string file = __FILE__, size_t line = __LINE__, Throwable next = null)
+    {
+        super(msg, file, line, next);
+    }
+
+    @safe pure nothrow this(string msg, Throwable next, string file = __FILE__, size_t line = __LINE__)
+    {
+        super(msg, file, line, next);
+    }
+}
 
 /// Data sent by the caller
 private struct Command
@@ -275,6 +287,7 @@ public final class RemoteAPI (API) : API
 
         Params:
           Impl = Type of the implementation to instantiate
+          timeout = timeout to use with requests
           args = Arguments to the object's constructor
 
         Returns:
@@ -282,10 +295,11 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args)
+    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
+        Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
-        return new RemoteAPI(childTid, true);
+        return new RemoteAPI(childTid, true, timeout);
     }
 
     /// Helper template to get the constructor's parameters
@@ -434,6 +448,9 @@ public final class RemoteAPI (API) : API
     /// Whether or not the destructor should destroy the thread
     private bool owner;
 
+    /// Timeout to use when issuing requests
+    private const Duration timeout;
+
     // Vibe.d mandates that method must be @safe
     @safe:
 
@@ -447,19 +464,21 @@ public final class RemoteAPI (API) : API
         Params:
           tid = `std.concurrency.Tid` of the node.
                 This can usually be obtained by `std.concurrency.locate`.
+          timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (C.Tid tid) @nogc pure nothrow
+    public this (C.Tid tid, Duration timeout = Duration.init) @nogc pure nothrow
     {
-        this(tid, false);
+        this(tid, false, timeout);
     }
 
     /// Private overload used by `spawn`
-    private this (C.Tid tid, bool isOwner) @nogc pure nothrow
+    private this (C.Tid tid, bool isOwner, Duration timeout) @nogc pure nothrow
     {
         this.childTid = tid;
         this.owner = isOwner;
+        this.timeout = timeout;
     }
 
     /***************************************************************************
@@ -623,15 +642,47 @@ public final class RemoteAPI (API) : API
                     auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                         .serializeToJsonString();
                     auto command = Command(C.thisTid(), size_t.max, ovrld.mangleof, serialized);
+                    bool timed_out;  // whether the request timed out
                     // `std.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {
                         // We're in the main thread / client, no re-entrancy,
                         // and no scheduler in sight, so KISS
-                        if (scheduler is null) {
+                        if (scheduler is null)
+                        {
                             C.send(this.childTid, command);
-                            return C.receiveOnly!(Response);
+
+                            if (this.timeout == Duration.init)
+                            {
+                                return C.receiveOnly!(Response);
+                            }
+                            else
+                            {
+                                bool received_value;
+                                Response actual_res;
+                                C.receiveTimeout(this.timeout,
+                                    (Response res)
+                                    {
+                                        received_value = true;
+                                        actual_res = res;
+                                    });
+
+                                if (received_value)
+                                {
+                                    return actual_res;
+                                }
+                                else
+                                {
+                                    timed_out = true;
+                                    import std.format;
+                                    immutable pretty = member ~ Parameters!ovrld.stringof;
+                                    return Response(false, command.id,
+                                        format("Request timeout for '%s'. Timeout: %s",
+                                            pretty, this.timeout));
+                                }
+                            }
                         }
+
                         // Scheduler / re-entrant path
                         command.id = scheduler.getNextResponseId();
                         C.send(this.childTid, command);
@@ -639,7 +690,12 @@ public final class RemoteAPI (API) : API
                         return res;
                     }();
                     if (!res.success)
-                        throw new Exception(res.data);
+                    {
+                        if (timed_out)
+                            throw new TimeoutException(res.data);
+                        else
+                            throw new Exception(res.data);
+                    }
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));
                 }
@@ -1175,4 +1231,42 @@ unittest
     node.clearFilter();
     node.foo();
     node.bar(1);
+}
+
+// request timeouts
+unittest
+{
+    import core.thread;
+
+    static interface API
+    {
+        size_t sleepFor (long dur);
+    }
+
+    static class Node : API
+    {
+        override size_t sleepFor (long dur)
+        {
+            Thread.sleep(msecs(dur));
+            return 42;
+        }
+    }
+
+    // node with no timeout
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.sleepFor(80) == 42);  // no timeout
+
+    // node with a configured timeout
+    auto to_node = RemoteAPI!API.spawn!Node(50.msecs);
+
+    /// none of these should time out
+    assert(to_node.sleepFor(10) == 42);
+    assert(to_node.sleepFor(20) == 42);
+    assert(to_node.sleepFor(30) == 42);
+    assert(to_node.sleepFor(40) == 42);
+
+    import std.exception;
+    auto exc = collectException!TimeoutException(to_node.sleepFor(100));
+    assert(exc !is null);
+    assert(exc.msg == "Request timeout for 'sleepFor(long)'. Timeout: 50 ms");
 }
