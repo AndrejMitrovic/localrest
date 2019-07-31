@@ -400,11 +400,14 @@ public final class RemoteAPI (API) : API
 
     private static void spawned (Implementation) (CtorParams!Implementation cargs)
     {
+        import std.datetime.systime;
         scope node = new Implementation(cargs);
         scheduler = new LocalScheduler;
         scope exc = new Exception("You should never see this exception - please report a bug");
 
         FilterAPI filter;
+
+        SysTime sleep_until;
 
         try scheduler.start(() {
                 bool terminated = false;
@@ -413,20 +416,24 @@ public final class RemoteAPI (API) : API
                     C.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
                         (TimeCommand s)      {
-                            Thread.sleep(s.dur);
-                            if (s.drop)
-                                removeMessages(size_t.max);
+                            sleep_until = Clock.currTime + s.dur;
                         },
                         (FilterAPI filter_api) {
                             filter = filter_api;
                         },
                         (Response res) {
-                            scheduler.pending = res;
-                            scheduler.waiting[res.id].c.notify();
+                            if (Clock.currTime >= sleep_until)
+                            {
+                                scheduler.pending = res;
+                                scheduler.waiting[res.id].c.notify();
+                            }
                         },
                         (Command cmd)
                         {
-                            scheduler.spawn(() => handleCommand(cmd, node, filter));
+                            if (Clock.currTime >= sleep_until)
+                            {
+                                scheduler.spawn(() => handleCommand(cmd, node, filter));
+                            }
                         });
                 }
                 // Make sure the scheduler is not waiting for polling tasks
@@ -435,16 +442,6 @@ public final class RemoteAPI (API) : API
         catch (Exception e)
             if (e !is exc)
                 throw e;
-    }
-
-    /// Clear up `max` messages from the pending messages
-    private static size_t removeMessages (size_t count)
-    {
-        const orig = count;
-        while (count > 0 &&
-            C.receiveTimeout(1.msecs, (Response res) {}, (Command res) {}))
-            count--;
-        return orig - count;
     }
 
     /// Where to send message to
