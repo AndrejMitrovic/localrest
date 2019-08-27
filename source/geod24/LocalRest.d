@@ -60,6 +60,8 @@ private struct Command
     string method;
     /// Arguments to the method, JSON formatted
     string args;
+    /// Caller thread awaiting response?
+    bool respond = true;
 }
 
 /// Ask the node to exhibit a certain behavior for a given time
@@ -358,22 +360,24 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            C.send(cmd.sender,
-                                Response(
-                                    Status.Success,
-                                    cmd.id,
-                                    node.%1$s(args.args).serializeToJsonString()));
+                            auto result = node.%1$s(args.args).serializeToJsonString();
+
+                            if (cmd.respond)
+                                C.send(cmd.sender, Response(Status.Success,cmd.id, result));
                         }
                         else
                         {
                             node.%1$s(args.args);
-                            C.send(cmd.sender, Response(Status.Success, cmd.id));
+
+                            if (cmd.respond)
+                                C.send(cmd.sender, Response(Status.Success, cmd.id));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
+                        if (cmd.respond)
+                            C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
                     }
 
                     return;
@@ -529,17 +533,18 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public this (C.Tid tid, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (C.Tid tid, Duration timeout = Duration.init) pure nothrow
     {
         this(tid, false, timeout);
     }
 
     /// Private overload used by `spawn`
-    private this (C.Tid tid, bool isOwner, Duration timeout) @nogc pure nothrow
+    private this (C.Tid tid, bool isOwner, Duration timeout) pure nothrow
     {
         this.childTid = tid;
         this.owner = isOwner;
         this.timeout = timeout;
+        this.async = new Async();
     }
 
     /***************************************************************************
@@ -687,6 +692,47 @@ public final class RemoteAPI (API) : API
             C.send(this.childTid, FilterAPI(""));
         }
     }
+
+    class Async
+    {
+        /***************************************************************************
+
+            Generate the API `override` which forward to the actual object
+
+        ***************************************************************************/
+
+        static foreach (member; __traits(allMembers, API))
+        static foreach (ovrld; __traits(getOverloads, API, member))
+        {
+            mixin(q{
+                void } ~ member ~ q{ (Parameters!ovrld params)
+                {
+                    auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                        .serializeToJsonString();
+                    const Respond = false;
+                    auto command = Command(C.thisTid(), size_t.max,
+                        ovrld.mangleof, serialized, Respond);
+                    // `std.concurrency.send/receive[Only]` is not `@safe` but
+                    // this overload needs to be
+                    () @trusted {
+                        // We're in the main thread / client, no re-entrancy,
+                        // and no scheduler in sight, so KISS
+                        if (scheduler is null)
+                        {
+                            C.send(this.outer.childTid, command);
+                            return;
+                        }
+
+                        // Scheduler / re-entrant path
+                        command.id = scheduler.getNextResponseId();
+                        C.send(this.outer.childTid, command);
+                    }();
+                }
+                });
+        }
+    }
+
+    Async async;
 
     /***************************************************************************
 
