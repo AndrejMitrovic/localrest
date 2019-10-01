@@ -87,6 +87,8 @@ import std.traits : Parameters, ReturnType;
 import core.thread;
 import core.time;
 
+import std.stdio;
+__gshared bool EnableLogging;
 
 /// Data sent by the caller
 private struct Command
@@ -110,6 +112,11 @@ private struct TimeCommand
     Duration dur;
     /// Whether or not affected messages should be dropped
     bool drop = false;
+}
+
+/// Make the node's thread shut down
+private struct ShutdownCommand
+{
 }
 
 /// Filter out requests before they reach a node
@@ -474,6 +481,7 @@ public final class RemoteAPI (API) : API
             FilterAPI filter;    // filter specific messages
             SysTime sleep_until; // sleep until this time
             bool drop;           // drop messages if sleeping
+            bool shutdown;       // whether to immediately shut down the thread
         }
 
         Control control;
@@ -508,6 +516,7 @@ public final class RemoteAPI (API) : API
                 {
                     C.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
+                        (ShutdownCommand e) { terminated = true; },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
@@ -523,6 +532,11 @@ public final class RemoteAPI (API) : API
                         },
                         (Command cmd)
                         {
+                            if (EnableLogging)
+                            {
+                                writefln("Child: Received command %s", cmd);
+                            }
+
                             if (!isSleeping())
                                 handle(cmd);
                             else if (!control.drop)
@@ -530,7 +544,7 @@ public final class RemoteAPI (API) : API
                         });
 
                     // now handle any leftover messages after any sleep() call
-                    if (!isSleeping())
+                    if (!terminated && !isSleeping())
                     {
                         await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
                         await_msgs.length = 0;
@@ -541,8 +555,15 @@ public final class RemoteAPI (API) : API
                 throw exc;
             });
         catch (Exception e)
+        {
+            if (EnableLogging)
+            {
+                writefln("Child: Shutting down");
+            }
+
             if (e !is exc)
                 throw e;
+        }
     }
 
     /// Where to send message to
@@ -613,6 +634,18 @@ public final class RemoteAPI (API) : API
         public C.Tid tid () @nogc pure nothrow
         {
             return this.childTid;
+        }
+
+        /***********************************************************************
+
+            Send a message to the thread to immediately shut down.
+            The thread will shut down as soon as this message is received.
+
+        ***********************************************************************/
+
+        public void shutdown () @trusted
+        {
+            C.send(this.childTid, ShutdownCommand());
         }
 
         /***********************************************************************
@@ -748,6 +781,12 @@ public final class RemoteAPI (API) : API
                     // `std.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {
+                        if (EnableLogging)
+                        {
+                            writefln("Main: Calling %s", member);
+                            stdout.flush();
+                        }
+
                         // We're in the main thread / client, no re-entrancy,
                         // and no scheduler in sight, so KISS
                         if (scheduler is null)
@@ -1457,4 +1496,40 @@ unittest
     node_1.check();
     node_1.ctrl.sleep(300.msecs);
     assert(node_1.ping() == 42);
+}
+
+// Test explicit shutdown
+unittest
+{
+    EnableLogging = true;
+    static import std.concurrency;
+
+    static interface API
+    {
+        int myping (int value);
+    }
+
+    static class Node : API
+    {
+        override int myping (int value)
+        {
+            return value;
+        }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node(1.seconds);
+
+    writefln("Main: Calling node.myping(42)");
+    writefln("Main: Received: %s", node.myping(42));
+    stdout.flush();
+
+    writefln("Main: Calling node.ctrl.shutdown()");
+    stdout.flush();
+    node.ctrl.shutdown();
+
+    Thread.sleep(1.seconds);
+
+    writefln("Main: Calling node.myping(69)");
+    writefln("Main: Received: %s", node.myping(69));
+    stdout.flush();
 }
