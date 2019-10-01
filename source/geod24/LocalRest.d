@@ -71,6 +71,11 @@ private struct TimeCommand
     bool drop = false;
 }
 
+/// Make the node's thread shut down
+private struct ShutdownCommand
+{
+}
+
 /// Filter out requests before they reach a node
 private struct FilterAPI
 {
@@ -609,6 +614,7 @@ public final class RemoteAPI (API) : API
             FilterAPI filter;    // filter specific messages
             SysTime sleep_until; // sleep until this time
             bool drop;           // drop messages if sleeping
+            bool shutdown;       // whether to immediately shut down the thread
         }
 
         Control control;
@@ -643,6 +649,7 @@ public final class RemoteAPI (API) : API
                 {
                     C.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
+                        (ShutdownCommand e) { terminated = true; },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
@@ -665,7 +672,7 @@ public final class RemoteAPI (API) : API
                         });
 
                     // now handle any leftover messages after any sleep() call
-                    if (!isSleeping())
+                    if (!terminated && !isSleeping())
                     {
                         await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
                         await_msgs.length = 0;
@@ -748,6 +755,18 @@ public final class RemoteAPI (API) : API
         public C.Tid tid () @nogc pure nothrow
         {
             return this.childTid;
+        }
+
+        /***********************************************************************
+
+            Send a message to the thread to immediately shut down.
+            Any subsequent messages will be dropped.
+
+        ***********************************************************************/
+
+        public void shutdown () @trusted
+        {
+            C.send(this.childTid, ShutdownCommand());
         }
 
         /***********************************************************************
