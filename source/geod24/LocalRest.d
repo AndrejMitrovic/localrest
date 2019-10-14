@@ -74,6 +74,7 @@ private struct TimeCommand
 /// Make the node's thread shut down
 private struct ShutdownCommand
 {
+    C.Tid tid;
 }
 
 /// Filter out requests before they reach a node
@@ -588,6 +589,24 @@ public final class RemoteAPI (API) : API
         import std.algorithm : each;
         import std.range;
 
+        // used for controling filtering / sleep
+        struct Control
+        {
+            FilterAPI filter;    // filter specific messages
+            SysTime sleep_until; // sleep until this time
+            bool drop;           // drop messages if sleeping
+            bool shutdown;       // whether to immediately shut down the thread
+            C.Tid parent_tid;    // tid of the thread which initiated the shutdown
+        }
+
+        Control control;
+
+        scope (exit)
+        if (control.shutdown)
+        {
+            C.send(control.parent_tid, ShutdownCommand(C.thisTid()));
+        }
+
         scope node = new Implementation(cargs);
         scheduler = new LocalScheduler;
         scope exc = new Exception("You should never see this exception - please report a bug");
@@ -607,17 +626,6 @@ public final class RemoteAPI (API) : API
 
             ubyte tag;
         }
-
-        // used for controling filtering / sleep
-        struct Control
-        {
-            FilterAPI filter;    // filter specific messages
-            SysTime sleep_until; // sleep until this time
-            bool drop;           // drop messages if sleeping
-            bool shutdown;       // whether to immediately shut down the thread
-        }
-
-        Control control;
 
         bool isSleeping()
         {
@@ -649,7 +657,11 @@ public final class RemoteAPI (API) : API
                 {
                     C.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
-                        (ShutdownCommand e) { terminated = true; },
+                        (ShutdownCommand e) {
+                            terminated = true;
+                            control.shutdown = true;
+                            control.parent_tid = e.tid;
+                        },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
@@ -766,7 +778,8 @@ public final class RemoteAPI (API) : API
 
         public void shutdown () @trusted
         {
-            C.send(this.childTid, ShutdownCommand());
+            C.send(this.childTid, ShutdownCommand(C.thisTid()));
+            C.receiveOnly!ShutdownCommand;
         }
 
         /***********************************************************************
