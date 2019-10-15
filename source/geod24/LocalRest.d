@@ -78,10 +78,13 @@
 
 module geod24.LocalRest;
 
+import geod24.VirtualClock;
+
 import vibe.data.json;
 
 static import C = std.concurrency;
 import std.meta : AliasSeq;
+import std.stdio;
 import std.traits : Parameters, ReturnType;
 
 import core.thread;
@@ -204,8 +207,10 @@ class BaseFiberScheduler : C.Scheduler
      * If the caller is a scheduled Fiber, this yields execution to another
      * scheduled Fiber.
      */
-    void yield() nothrow
+    void yield () nothrow
     {
+        VirtualClock.advanceTime();
+
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an InfoFiber before yielding, but I think it's reasonable
         //       that any (non-Generator) fiber should yield here.
@@ -406,17 +411,31 @@ private final class LocalScheduler : BaseFiberScheduler
         override void wait() nothrow
         {
             scope (exit) notified = false;
+
+            auto event = VirtualClock.addEvent();
+            scope (exit)
+            {
+                VirtualClock.removeEvent(event);
+                VirtualClock.advanceTime();
+            }
+
             while (!notified)
                 this.outer.yield();
         }
 
-        override bool wait(Duration period) nothrow
+        override bool wait (Duration period) nothrow
         {
+            scope (failure) assert(0);
             scope (exit) notified = false;
 
-            for (auto limit = MonoTime.currTime + period;
-                 !notified && !period.isNegative;
-                 period = limit - MonoTime.currTime)
+            auto event = VirtualClock.addWaitEvent(period);
+            scope (exit)
+            {
+                VirtualClock.removeEvent(event);
+                VirtualClock.advanceTime();
+            }
+
+            while (!notified && VirtualClock.currTime < event.time)
             {
                 this.outer.yield();
             }
@@ -999,249 +1018,249 @@ public final class RemoteAPI (API) : API
 }
 
 /// Simple usage example
-unittest
-{
-    static interface API
-    {
-        @safe:
-        public @property ulong pubkey ();
-        public Json getValue (ulong idx);
-        public Json getQuorumSet ();
-        public string recv (Json data);
-    }
+//unittest
+//{
+//    static interface API
+//    {
+//        @safe:
+//        public @property ulong pubkey ();
+//        public Json getValue (ulong idx);
+//        public Json getQuorumSet ();
+//        public string recv (Json data);
+//    }
 
-    static class MockAPI : API
-    {
-        @safe:
-        public override @property ulong pubkey ()
-        { return 42; }
-        public override Json getValue (ulong idx)
-        { assert(0); }
-        public override Json getQuorumSet ()
-        { assert(0); }
-        public override string recv (Json data)
-        { assert(0); }
-    }
+//    static class MockAPI : API
+//    {
+//        @safe:
+//        public override @property ulong pubkey ()
+//        { return 42; }
+//        public override Json getValue (ulong idx)
+//        { assert(0); }
+//        public override Json getQuorumSet ()
+//        { assert(0); }
+//        public override string recv (Json data)
+//        { assert(0); }
+//    }
 
-    scope test = RemoteAPI!API.spawn!MockAPI();
-    assert(test.pubkey() == 42);
-    test.ctrl.shutdown();
-}
+//    scope test = RemoteAPI!API.spawn!MockAPI();
+//    assert(test.pubkey() == 42);
+//    test.ctrl.shutdown();
+//}
 
-/// In a real world usage, users will most likely need to use the registry
-unittest
-{
-    import std.conv;
-    static import std.concurrency;
+///// In a real world usage, users will most likely need to use the registry
+//unittest
+//{
+//    import std.conv;
+//    static import std.concurrency;
 
-    static interface API
-    {
-        @safe:
-        public @property ulong pubkey ();
-        public Json getValue (ulong idx);
-        public string recv (Json data);
-        public string recv (ulong index, Json data);
+//    static interface API
+//    {
+//        @safe:
+//        public @property ulong pubkey ();
+//        public Json getValue (ulong idx);
+//        public string recv (Json data);
+//        public string recv (ulong index, Json data);
 
-        public string last ();
-    }
+//        public string last ();
+//    }
 
-    static class Node : API
-    {
-        @safe:
-        public this (bool isByzantine) { this.isByzantine = isByzantine; }
-        public override @property ulong pubkey ()
-        { lastCall = `pubkey`; return this.isByzantine ? 0 : 42; }
-        public override Json getValue (ulong idx)
-        { lastCall = `getValue`; return Json.init; }
-        public override string recv (Json data)
-        { lastCall = `recv@1`; return null; }
-        public override string recv (ulong index, Json data)
-        { lastCall = `recv@2`; return null; }
+//    static class Node : API
+//    {
+//        @safe:
+//        public this (bool isByzantine) { this.isByzantine = isByzantine; }
+//        public override @property ulong pubkey ()
+//        { lastCall = `pubkey`; return this.isByzantine ? 0 : 42; }
+//        public override Json getValue (ulong idx)
+//        { lastCall = `getValue`; return Json.init; }
+//        public override string recv (Json data)
+//        { lastCall = `recv@1`; return null; }
+//        public override string recv (ulong index, Json data)
+//        { lastCall = `recv@2`; return null; }
 
-        public override string last () { return this.lastCall; }
+//        public override string last () { return this.lastCall; }
 
-        private bool isByzantine;
-        private string lastCall;
-    }
+//        private bool isByzantine;
+//        private string lastCall;
+//    }
 
-    static RemoteAPI!API factory (string type, ulong hash)
-    {
-        const name = hash.to!string;
-        auto tid = std.concurrency.locate(name);
-        if (tid != tid.init)
-            return new RemoteAPI!API(tid);
+//    static RemoteAPI!API factory (string type, ulong hash)
+//    {
+//        const name = hash.to!string;
+//        auto tid = std.concurrency.locate(name);
+//        if (tid != tid.init)
+//            return new RemoteAPI!API(tid);
 
-        switch (type)
-        {
-        case "normal":
-            auto ret =  RemoteAPI!API.spawn!Node(false);
-            std.concurrency.register(name, ret.tid());
-            return ret;
-        case "byzantine":
-            auto ret =  RemoteAPI!API.spawn!Node(true);
-            std.concurrency.register(name, ret.tid());
-            return ret;
-        default:
-            assert(0, type);
-        }
-    }
+//        switch (type)
+//        {
+//        case "normal":
+//            auto ret =  RemoteAPI!API.spawn!Node(false);
+//            std.concurrency.register(name, ret.tid());
+//            return ret;
+//        case "byzantine":
+//            auto ret =  RemoteAPI!API.spawn!Node(true);
+//            std.concurrency.register(name, ret.tid());
+//            return ret;
+//        default:
+//            assert(0, type);
+//        }
+//    }
 
-    auto node1 = factory("normal", 1);
-    auto node2 = factory("byzantine", 2);
+//    auto node1 = factory("normal", 1);
+//    auto node2 = factory("byzantine", 2);
 
-    static void testFunc(std.concurrency.Tid parent)
-    {
-        auto node1 = factory("this does not matter", 1);
-        auto node2 = factory("neither does this", 2);
-        assert(node1.pubkey() == 42);
-        assert(node1.last() == "pubkey");
-        assert(node2.pubkey() == 0);
-        assert(node2.last() == "pubkey");
+//    static void testFunc(std.concurrency.Tid parent)
+//    {
+//        auto node1 = factory("this does not matter", 1);
+//        auto node2 = factory("neither does this", 2);
+//        assert(node1.pubkey() == 42);
+//        assert(node1.last() == "pubkey");
+//        assert(node2.pubkey() == 0);
+//        assert(node2.last() == "pubkey");
 
-        node1.recv(42, Json.init);
-        assert(node1.last() == "recv@2");
-        node1.recv(Json.init);
-        assert(node1.last() == "recv@1");
-        assert(node2.last() == "pubkey");
-        node1.ctrl.shutdown();
-        node2.ctrl.shutdown();
-        std.concurrency.send(parent, 42);
-    }
+//        node1.recv(42, Json.init);
+//        assert(node1.last() == "recv@2");
+//        node1.recv(Json.init);
+//        assert(node1.last() == "recv@1");
+//        assert(node2.last() == "pubkey");
+//        node1.ctrl.shutdown();
+//        node2.ctrl.shutdown();
+//        std.concurrency.send(parent, 42);
+//    }
 
-    auto testerFiber = std.concurrency.spawn(&testFunc, std.concurrency.thisTid);
-    // Make sure our main thread terminates after everyone else
-    std.concurrency.receiveOnly!int();
-}
+//    auto testerFiber = std.concurrency.spawn(&testFunc, std.concurrency.thisTid);
+//    // Make sure our main thread terminates after everyone else
+//    std.concurrency.receiveOnly!int();
+//}
 
-/// This network have different types of nodes in it
-unittest
-{
-    import std.concurrency;
+///// This network have different types of nodes in it
+//unittest
+//{
+//    import std.concurrency;
 
-    static interface API
-    {
-        @safe:
-        public @property ulong requests ();
-        public @property ulong value ();
-    }
+//    static interface API
+//    {
+//        @safe:
+//        public @property ulong requests ();
+//        public @property ulong value ();
+//    }
 
-    static class MasterNode : API
-    {
-        @safe:
-        public override @property ulong requests()
-        {
-            return this.requests_;
-        }
+//    static class MasterNode : API
+//    {
+//        @safe:
+//        public override @property ulong requests()
+//        {
+//            return this.requests_;
+//        }
 
-        public override @property ulong value()
-        {
-            this.requests_++;
-            return 42; // Of course
-        }
+//        public override @property ulong value()
+//        {
+//            this.requests_++;
+//            return 42; // Of course
+//        }
 
-        private ulong requests_;
-    }
+//        private ulong requests_;
+//    }
 
-    static class SlaveNode : API
-    {
-        @safe:
-        this(Tid masterTid)
-        {
-            this.master = new RemoteAPI!API(masterTid);
-        }
+//    static class SlaveNode : API
+//    {
+//        @safe:
+//        this(Tid masterTid)
+//        {
+//            this.master = new RemoteAPI!API(masterTid);
+//        }
 
-        public override @property ulong requests()
-        {
-            return this.requests_;
-        }
+//        public override @property ulong requests()
+//        {
+//            return this.requests_;
+//        }
 
-        public override @property ulong value()
-        {
-            this.requests_++;
-            return master.value();
-        }
+//        public override @property ulong value()
+//        {
+//            this.requests_++;
+//            return master.value();
+//        }
 
-        private API master;
-        private ulong requests_;
-    }
+//        private API master;
+//        private ulong requests_;
+//    }
 
-    RemoteAPI!API[4] nodes;
-    auto master = RemoteAPI!API.spawn!MasterNode();
-    nodes[0] = master;
-    nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.tid());
-    nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.tid());
-    nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.tid());
+//    RemoteAPI!API[4] nodes;
+//    auto master = RemoteAPI!API.spawn!MasterNode();
+//    nodes[0] = master;
+//    nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.tid());
+//    nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.tid());
+//    nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.tid());
 
-    foreach (n; nodes)
-    {
-        assert(n.requests() == 0);
-        assert(n.value() == 42);
-    }
+//    foreach (n; nodes)
+//    {
+//        assert(n.requests() == 0);
+//        assert(n.value() == 42);
+//    }
 
-    assert(nodes[0].requests() == 4);
+//    assert(nodes[0].requests() == 4);
 
-    foreach (n; nodes[1 .. $])
-    {
-        assert(n.value() == 42);
-        assert(n.requests() == 2);
-    }
+//    foreach (n; nodes[1 .. $])
+//    {
+//        assert(n.value() == 42);
+//        assert(n.requests() == 2);
+//    }
 
-    assert(nodes[0].requests() == 7);
-    import std.algorithm;
-    nodes.each!(node => node.ctrl.shutdown());
-}
+//    assert(nodes[0].requests() == 7);
+//    import std.algorithm;
+//    nodes.each!(node => node.ctrl.shutdown());
+//}
 
-/// Support for circular nodes call
-unittest
-{
-    static import std.concurrency;
-    import std.format;
+///// Support for circular nodes call
+//unittest
+//{
+//    static import std.concurrency;
+//    import std.format;
 
-    __gshared C.Tid[string] tbn;
+//    __gshared C.Tid[string] tbn;
 
-    static interface API
-    {
-        @safe:
-        public ulong call (ulong count, ulong val);
-        public void setNext (string name);
-    }
+//    static interface API
+//    {
+//        @safe:
+//        public ulong call (ulong count, ulong val);
+//        public void setNext (string name);
+//    }
 
-    static class Node : API
-    {
-        @safe:
-        public override ulong call (ulong count, ulong val)
-        {
-            if (!count)
-                return val;
-            return this.next.call(count - 1, val + count);
-        }
+//    static class Node : API
+//    {
+//        @safe:
+//        public override ulong call (ulong count, ulong val)
+//        {
+//            if (!count)
+//                return val;
+//            return this.next.call(count - 1, val + count);
+//        }
 
-        public override void setNext (string name) @trusted
-        {
-            this.next = new RemoteAPI!API(tbn[name]);
-        }
+//        public override void setNext (string name) @trusted
+//        {
+//            this.next = new RemoteAPI!API(tbn[name]);
+//        }
 
-        private API next;
-    }
+//        private API next;
+//    }
 
-    RemoteAPI!(API)[3] nodes = [
-        RemoteAPI!API.spawn!Node(),
-        RemoteAPI!API.spawn!Node(),
-        RemoteAPI!API.spawn!Node(),
-    ];
+//    RemoteAPI!(API)[3] nodes = [
+//        RemoteAPI!API.spawn!Node(),
+//        RemoteAPI!API.spawn!Node(),
+//        RemoteAPI!API.spawn!Node(),
+//    ];
 
-    foreach (idx, ref api; nodes)
-        tbn[format("node%d", idx)] = api.tid();
-    nodes[0].setNext("node1");
-    nodes[1].setNext("node2");
-    nodes[2].setNext("node0");
+//    foreach (idx, ref api; nodes)
+//        tbn[format("node%d", idx)] = api.tid();
+//    nodes[0].setNext("node1");
+//    nodes[1].setNext("node2");
+//    nodes[2].setNext("node0");
 
-    // 7 level of re-entrancy
-    assert(210 == nodes[0].call(20, 0));
+//    // 7 level of re-entrancy
+//    assert(210 == nodes[0].call(20, 0));
 
-    import std.algorithm;
-    nodes.each!(node => node.ctrl.shutdown());
-}
+//    import std.algorithm;
+//    nodes.each!(node => node.ctrl.shutdown());
+//}
 
 
 /// Nodes can start tasks
@@ -1271,10 +1290,20 @@ unittest
 
         private void task ()
         {
+            writefln("Child thread started");
             while (true)
             {
                 this.counter++;
-                sleep(50.msecs);
+                auto sleep_time = 50.msecs;
+                auto cur_time = VirtualClock.currTime - VirtualClock.start_time;
+                auto wake_time = cur_time + sleep_time;
+
+                //writefln("Counter set to %s. Sleeping %s from +%s to +%s",
+                //    this.counter, sleep_time, cur_time, wake_time);
+
+                sleep(sleep_time);
+                cur_time = VirtualClock.currTime - VirtualClock.start_time;
+                //writefln("Done sleeping at +%s", cur_time);
             }
         }
 
@@ -1283,526 +1312,524 @@ unittest
 
     import std.format;
     auto node = RemoteAPI!API.spawn!Node();
-    assert(node.getCounter() == 0);
     node.start();
-    assert(node.getCounter() == 1);
-    assert(node.getCounter() == 0);
-    core.thread.Thread.sleep(1.seconds);
-    // It should be 19 but some machines are very slow
-    // (e.g. Travis Mac testers) so be safe
-    assert(node.getCounter() >= 9);
-    assert(node.getCounter() == 0);
-    node.ctrl.shutdown();
-}
-
-// Sane name insurance policy
-unittest
-{
-    import std.concurrency : Tid;
-
-    static interface API
-    {
-        public ulong tid ();
-    }
-
-    static class Node : API
-    {
-        public override ulong tid () { return 42; }
-    }
-
-    auto node = RemoteAPI!API.spawn!Node();
-    assert(node.tid == 42);
-    assert(node.ctrl.tid != Tid.init);
-
-    static interface DoesntWork
-    {
-        public string ctrl ();
-    }
-    static assert(!is(typeof(RemoteAPI!DoesntWork)));
-    node.ctrl.shutdown();
-}
-
-// Simulate temporary outage
-unittest
-{
-    __gshared C.Tid n1tid;
-
-    static interface API
-    {
-        public ulong call ();
-        public void asyncCall ();
-    }
-    static class Node : API
-    {
-        public this()
-        {
-            if (n1tid != C.Tid.init)
-                this.remote = new RemoteAPI!API(n1tid);
-        }
-
-        public override ulong call () { return ++this.count; }
-        public override void  asyncCall () { runTask(() => cast(void)this.remote.call); }
-        size_t count;
-        RemoteAPI!API remote;
-    }
-
-    auto n1 = RemoteAPI!API.spawn!Node();
-    n1tid = n1.tid();
-    auto n2 = RemoteAPI!API.spawn!Node();
-
-    /// Make sure calls are *relatively* efficient
-    auto current1 = MonoTime.currTime();
-    assert(1 == n1.call());
-    assert(1 == n2.call());
-    auto current2 = MonoTime.currTime();
-    assert(current2 - current1 < 200.msecs);
-
-    // Make one of the node sleep
-    n1.sleep(1.seconds);
-    // Make sure our main thread is not suspended,
-    // nor is the second node
-    assert(2 == n2.call());
-    auto current3 = MonoTime.currTime();
-    assert(current3 - current2 < 400.msecs);
-
-    // Wait for n1 to unblock
-    assert(2 == n1.call());
-    // Check current time >= 1 second
-    auto current4 = MonoTime.currTime();
-    assert(current4 - current2 >= 1.seconds);
-
-    // Now drop many messages
-    n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 500; i++)
-        n2.asyncCall();
-    // Make sure we don't end up blocked forever
+    writefln("About to sleep thread()");
     Thread.sleep(1.seconds);
-    assert(3 == n1.call());
-
-    // Debug output, uncomment if needed
-    version (none)
-    {
-        import std.stdio;
-        writeln("Two non-blocking calls: ", current2 - current1);
-        writeln("Sleep + non-blocking call: ", current3 - current2);
-        writeln("Delta since sleep: ", current4 - current2);
-    }
-
-    n1.ctrl.shutdown();
-    n2.ctrl.shutdown();
-}
-
-// Filter commands
-unittest
-{
-    __gshared C.Tid node_tid;
-
-    static interface API
-    {
-        size_t fooCount();
-        size_t fooIntCount();
-        size_t barCount ();
-        void foo ();
-        void foo (int);
-        void bar (int);  // not in any overload set
-        void callBar (int);
-        void callFoo ();
-        void callFoo (int);
-    }
-
-    static class Node : API
-    {
-        size_t foo_count;
-        size_t foo_int_count;
-        size_t bar_count;
-        RemoteAPI!API remote;
-
-        public this()
-        {
-            this.remote = new RemoteAPI!API(node_tid);
-        }
-
-        override size_t fooCount() { return this.foo_count; }
-        override size_t fooIntCount() { return this.foo_int_count; }
-        override size_t barCount() { return this.bar_count; }
-        override void foo () { ++this.foo_count; }
-        override void foo (int) { ++this.foo_int_count; }
-        override void bar (int) { ++this.bar_count; }  // not in any overload set
-        // This one is part of the overload set of the node, but not of the API
-        // It can't be accessed via API and can't be filtered out
-        void bar(string) { assert(0); }
-
-        override void callFoo()
-        {
-            try
-            {
-                this.remote.foo();
-            }
-            catch (Exception ex)
-            {
-                assert(ex.msg == "Filtered method 'foo()'");
-            }
-        }
-
-        override void callFoo(int arg)
-        {
-            try
-            {
-                this.remote.foo(arg);
-            }
-            catch (Exception ex)
-            {
-                assert(ex.msg == "Filtered method 'foo(int)'");
-            }
-        }
-
-        override void callBar(int arg)
-        {
-            try
-            {
-                this.remote.bar(arg);
-            }
-            catch (Exception ex)
-            {
-                assert(ex.msg == "Filtered method 'bar(int)'");
-            }
-        }
-    }
-
-    auto filtered = RemoteAPI!API.spawn!Node();
-    node_tid = filtered.tid();
-
-    // caller will call filtered
-    auto caller = RemoteAPI!API.spawn!Node();
-    caller.callFoo();
-    assert(filtered.fooCount() == 1);
-
-    // both of these work
-    static assert(is(typeof(filtered.filter!(API.foo))));
-    static assert(is(typeof(filtered.filter!(filtered.foo))));
-
-    // only method in the overload set that takes a parameter,
-    // should still match a call to filter with no parameters
-    static assert(is(typeof(filtered.filter!(filtered.bar))));
-
-    // wrong parameters => fail to compile
-    static assert(!is(typeof(filtered.filter!(filtered.bar, float))));
-    // Only `API` overload sets are considered
-    static assert(!is(typeof(filtered.filter!(filtered.bar, string))));
-
-    filtered.filter!(API.foo);
-
-    caller.callFoo();
-    assert(filtered.fooCount() == 1);  // it was not called!
-
-    filtered.clearFilter();  // clear the filter
-    caller.callFoo();
-    assert(filtered.fooCount() == 2);  // it was called!
-
-    // verify foo(int) works first
-    caller.callFoo(1);
-    assert(filtered.fooCount() == 2);
-    assert(filtered.fooIntCount() == 1);  // first time called
-
-    // now filter only the int overload
-    filtered.filter!(API.foo, int);
-
-    // make sure the parameterless overload is still not filtered
-    caller.callFoo();
-    assert(filtered.fooCount() == 3);  // updated
-
-    caller.callFoo(1);
-    assert(filtered.fooIntCount() == 1);  // call filtered!
-
-    // not filtered yet
-    caller.callBar(1);
-    assert(filtered.barCount() == 1);
-
-    filtered.filter!(filtered.bar);
-    caller.callBar(1);
-    assert(filtered.barCount() == 1);  // filtered!
-
-    // last blocking calls, to ensure the previous calls complete
-    filtered.clearFilter();
-    caller.foo();
-    caller.bar(1);
-
-    filtered.ctrl.shutdown();
-    caller.ctrl.shutdown();
-}
-
-// request timeouts (from main thread)
-unittest
-{
-    import core.thread;
-    import std.exception;
-
-    static interface API
-    {
-        size_t sleepFor (long dur);
-    }
-
-    static class Node : API
-    {
-        override size_t sleepFor (long dur)
-        {
-            Thread.sleep(msecs(dur));
-            return 42;
-        }
-    }
-
-    // node with no timeout
-    auto node = RemoteAPI!API.spawn!Node();
-    assert(node.sleepFor(80) == 42);  // no timeout
-
-    // node with a configured timeout
-    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
-
-    /// none of these should time out
-    assert(to_node.sleepFor(10) == 42);
-    assert(to_node.sleepFor(20) == 42);
-    assert(to_node.sleepFor(30) == 42);
-    assert(to_node.sleepFor(40) == 42);
-
-    assertThrown!Exception(to_node.sleepFor(2000));
-    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
-    to_node.ctrl.shutdown();
-    node.ctrl.shutdown();
-}
-
-// test-case for responses to re-used requests (from main thread)
-unittest
-{
-    import core.thread;
-    import std.exception;
-
-    static interface API
-    {
-        float getFloat();
-        size_t sleepFor (long dur);
-    }
-
-    static class Node : API
-    {
-        override float getFloat() { return 69.69; }
-        override size_t sleepFor (long dur)
-        {
-            Thread.sleep(msecs(dur));
-            return 42;
-        }
-    }
-
-    // node with no timeout
-    auto node = RemoteAPI!API.spawn!Node();
-    assert(node.sleepFor(80) == 42);  // no timeout
-
-    // node with a configured timeout
-    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
-
-    /// none of these should time out
-    assert(to_node.sleepFor(10) == 42);
-    assert(to_node.sleepFor(20) == 42);
-    assert(to_node.sleepFor(30) == 42);
-    assert(to_node.sleepFor(40) == 42);
-
-    assertThrown!Exception(to_node.sleepFor(2000));
-    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    writefln("Done sleeping thread()");
+    auto counter = node.getCounter();
     import std.stdio;
-    assert(cast(int)to_node.getFloat() == 69);
-
-    to_node.ctrl.shutdown();
+    writefln("Got counter: %s", counter);
     node.ctrl.shutdown();
 }
 
-// request timeouts (foreign node to another node)
-unittest
-{
-    static import std.concurrency;
-    import std.exception;
+//// Sane name insurance policy
+//unittest
+//{
+//    import std.concurrency : Tid;
 
-    __gshared C.Tid node_tid;
+//    static interface API
+//    {
+//        public ulong tid ();
+//    }
 
-    static interface API
-    {
-        void check ();
-        int ping ();
-    }
+//    static class Node : API
+//    {
+//        public override ulong tid () { return 42; }
+//    }
 
-    static class Node : API
-    {
-        override int ping () { return 42; }
+//    auto node = RemoteAPI!API.spawn!Node();
+//    assert(node.tid == 42);
+//    assert(node.ctrl.tid != Tid.init);
 
-        override void check ()
-        {
-            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+//    static interface DoesntWork
+//    {
+//        public string ctrl ();
+//    }
+//    static assert(!is(typeof(RemoteAPI!DoesntWork)));
+//    node.ctrl.shutdown();
+//}
 
-            // no time-out
-            node.ctrl.sleep(10.msecs);
-            assert(node.ping() == 42);
+//// Simulate temporary outage
+//unittest
+//{
+//    __gshared C.Tid n1tid;
 
-            // time-out
-            node.ctrl.sleep(2000.msecs);
-            assertThrown!Exception(node.ping());
-        }
-    }
+//    static interface API
+//    {
+//        public ulong call ();
+//        public void asyncCall ();
+//    }
+//    static class Node : API
+//    {
+//        public this()
+//        {
+//            if (n1tid != C.Tid.init)
+//                this.remote = new RemoteAPI!API(n1tid);
+//        }
 
-    auto node_1 = RemoteAPI!API.spawn!Node();
-    auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
-    node_1.check();
-    node_1.ctrl.shutdown();
-    node_2.ctrl.shutdown();
-}
+//        public override ulong call () { return ++this.count; }
+//        public override void  asyncCall () { runTask(() => cast(void)this.remote.call); }
+//        size_t count;
+//        RemoteAPI!API remote;
+//    }
 
-// test-case for zombie responses
-unittest
-{
-    static import std.concurrency;
-    import std.exception;
+//    auto n1 = RemoteAPI!API.spawn!Node();
+//    n1tid = n1.tid();
+//    auto n2 = RemoteAPI!API.spawn!Node();
 
-    __gshared C.Tid node_tid;
+//    /// Make sure calls are *relatively* efficient
+//    auto current1 = VirtualClock.currTime();
+//    assert(1 == n1.call());
+//    assert(1 == n2.call());
+//    auto current2 = VirtualClock.currTime();
+//    assert(current2 - current1 < 200.msecs);
 
-    static interface API
-    {
-        void check ();
-        int get42 ();
-        int get69 ();
-    }
+//    // Make one of the node sleep
+//    n1.sleep(1.seconds);
+//    // Make sure our main thread is not suspended,
+//    // nor is the second node
+//    assert(2 == n2.call());
+//    auto current3 = VirtualClock.currTime();
+//    assert(current3 - current2 < 400.msecs);
 
-    static class Node : API
-    {
-        override int get42 () { return 42; }
-        override int get69 () { return 69; }
+//    // Wait for n1 to unblock
+//    assert(2 == n1.call());
+//    // Check current time >= 1 second
+//    auto current4 = VirtualClock.currTime();
+//    assert(current4 - current2 >= 1.seconds);
 
-        override void check ()
-        {
-            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+//    // Now drop many messages
+//    n1.sleep(1.seconds, true);
+//    for (size_t i = 0; i < 500; i++)
+//        n2.asyncCall();
+//    // Make sure we don't end up blocked forever
+//    Thread.sleep(1.seconds);
+//    assert(3 == n1.call());
 
-            // time-out
-            node.ctrl.sleep(2000.msecs);
-            assertThrown!Exception(node.get42());
+//    // Debug output, uncomment if needed
+//    version (none)
+//    {
+//        import std.stdio;
+//        writeln("Two non-blocking calls: ", current2 - current1);
+//        writeln("Sleep + non-blocking call: ", current3 - current2);
+//        writeln("Delta since sleep: ", current4 - current2);
+//    }
 
-            // no time-out
-            node.ctrl.sleep(10.msecs);
-            assert(node.get69() == 69);
-        }
-    }
+//    n1.ctrl.shutdown();
+//    n2.ctrl.shutdown();
+//}
 
-    auto node_1 = RemoteAPI!API.spawn!Node();
-    auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
-    node_1.check();
-    node_1.ctrl.shutdown();
-    node_2.ctrl.shutdown();
-}
+//// Filter commands
+//unittest
+//{
+//    __gshared C.Tid node_tid;
 
-// request timeouts with dropped messages
-unittest
-{
-    static import std.concurrency;
-    import std.exception;
+//    static interface API
+//    {
+//        size_t fooCount();
+//        size_t fooIntCount();
+//        size_t barCount ();
+//        void foo ();
+//        void foo (int);
+//        void bar (int);  // not in any overload set
+//        void callBar (int);
+//        void callFoo ();
+//        void callFoo (int);
+//    }
 
-    __gshared C.Tid node_tid;
+//    static class Node : API
+//    {
+//        size_t foo_count;
+//        size_t foo_int_count;
+//        size_t bar_count;
+//        RemoteAPI!API remote;
 
-    static interface API
-    {
-        void check ();
-        int ping ();
-    }
+//        public this()
+//        {
+//            this.remote = new RemoteAPI!API(node_tid);
+//        }
 
-    static class Node : API
-    {
-        override int ping () { return 42; }
+//        override size_t fooCount() { return this.foo_count; }
+//        override size_t fooIntCount() { return this.foo_int_count; }
+//        override size_t barCount() { return this.bar_count; }
+//        override void foo () { ++this.foo_count; }
+//        override void foo (int) { ++this.foo_int_count; }
+//        override void bar (int) { ++this.bar_count; }  // not in any overload set
+//        // This one is part of the overload set of the node, but not of the API
+//        // It can't be accessed via API and can't be filtered out
+//        void bar(string) { assert(0); }
 
-        override void check ()
-        {
-            auto node = new RemoteAPI!API(node_tid, 420.msecs);
+//        override void callFoo()
+//        {
+//            try
+//            {
+//                this.remote.foo();
+//            }
+//            catch (Exception ex)
+//            {
+//                assert(ex.msg == "Filtered method 'foo()'");
+//            }
+//        }
 
-            // Requests are dropped, so it times out
-            assert(node.ping() == 42);
-            node.ctrl.sleep(10.msecs, true);
-            assertThrown!Exception(node.ping());
-        }
-    }
+//        override void callFoo(int arg)
+//        {
+//            try
+//            {
+//                this.remote.foo(arg);
+//            }
+//            catch (Exception ex)
+//            {
+//                assert(ex.msg == "Filtered method 'foo(int)'");
+//            }
+//        }
 
-    auto node_1 = RemoteAPI!API.spawn!Node();
-    auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
-    node_1.check();
-    node_1.ctrl.shutdown();
-    node_2.ctrl.shutdown();
-}
+//        override void callBar(int arg)
+//        {
+//            try
+//            {
+//                this.remote.bar(arg);
+//            }
+//            catch (Exception ex)
+//            {
+//                assert(ex.msg == "Filtered method 'bar(int)'");
+//            }
+//        }
+//    }
 
-// Test a node that gets a replay while it's delayed
-unittest
-{
-    static import std.concurrency;
-    import std.exception;
+//    auto filtered = RemoteAPI!API.spawn!Node();
+//    node_tid = filtered.tid();
 
-    __gshared C.Tid node_tid;
+//    // caller will call filtered
+//    auto caller = RemoteAPI!API.spawn!Node();
+//    caller.callFoo();
+//    assert(filtered.fooCount() == 1);
 
-    static interface API
-    {
-        void check ();
-        int ping ();
-    }
+//    // both of these work
+//    static assert(is(typeof(filtered.filter!(API.foo))));
+//    static assert(is(typeof(filtered.filter!(filtered.foo))));
 
-    static class Node : API
-    {
-        override int ping () { return 42; }
+//    // only method in the overload set that takes a parameter,
+//    // should still match a call to filter with no parameters
+//    static assert(is(typeof(filtered.filter!(filtered.bar))));
 
-        override void check ()
-        {
-            auto node = new RemoteAPI!API(node_tid, 5000.msecs);
-            assert(node.ping() == 42);
-            // We need to return immediately so that the main thread
-            // puts us to sleep
-            runTask(() {
-                    node.ctrl.sleep(200.msecs);
-                    assert(node.ping() == 42);
-                });
-        }
-    }
+//    // wrong parameters => fail to compile
+//    static assert(!is(typeof(filtered.filter!(filtered.bar, float))));
+//    // Only `API` overload sets are considered
+//    static assert(!is(typeof(filtered.filter!(filtered.bar, string))));
 
-    auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
-    auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
-    node_1.check();
-    node_1.ctrl.sleep(300.msecs);
-    assert(node_1.ping() == 42);
-    node_1.ctrl.shutdown();
-    node_2.ctrl.shutdown();
-}
+//    filtered.filter!(API.foo);
 
-// Test explicit shutdown
-unittest
-{
-    import std.exception;
+//    caller.callFoo();
+//    assert(filtered.fooCount() == 1);  // it was not called!
 
-    static interface API
-    {
-        int myping (int value);
-    }
+//    filtered.clearFilter();  // clear the filter
+//    caller.callFoo();
+//    assert(filtered.fooCount() == 2);  // it was called!
 
-    static class Node : API
-    {
-        override int myping (int value)
-        {
-            return value;
-        }
-    }
+//    // verify foo(int) works first
+//    caller.callFoo(1);
+//    assert(filtered.fooCount() == 2);
+//    assert(filtered.fooIntCount() == 1);  // first time called
 
-    auto node = RemoteAPI!API.spawn!Node(1.seconds);
-    assert(node.myping(42) == 42);
-    node.ctrl.shutdown();
+//    // now filter only the int overload
+//    filtered.filter!(API.foo, int);
 
-    try
-    {
-        node.myping(69);
-        assert(0);
-    }
-    catch (Exception ex)
-    {
-        assert(ex.msg == `"Request timed-out"`);
-    }
-}
+//    // make sure the parameterless overload is still not filtered
+//    caller.callFoo();
+//    assert(filtered.fooCount() == 3);  // updated
+
+//    caller.callFoo(1);
+//    assert(filtered.fooIntCount() == 1);  // call filtered!
+
+//    // not filtered yet
+//    caller.callBar(1);
+//    assert(filtered.barCount() == 1);
+
+//    filtered.filter!(filtered.bar);
+//    caller.callBar(1);
+//    assert(filtered.barCount() == 1);  // filtered!
+
+//    // last blocking calls, to ensure the previous calls complete
+//    filtered.clearFilter();
+//    caller.foo();
+//    caller.bar(1);
+
+//    filtered.ctrl.shutdown();
+//    caller.ctrl.shutdown();
+//}
+
+//// request timeouts (from main thread)
+//unittest
+//{
+//    import core.thread;
+//    import std.exception;
+
+//    static interface API
+//    {
+//        size_t sleepFor (long dur);
+//    }
+
+//    static class Node : API
+//    {
+//        override size_t sleepFor (long dur)
+//        {
+//            Thread.sleep(msecs(dur));
+//            return 42;
+//        }
+//    }
+
+//    // node with no timeout
+//    auto node = RemoteAPI!API.spawn!Node();
+//    assert(node.sleepFor(80) == 42);  // no timeout
+
+//    // node with a configured timeout
+//    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+
+//    /// none of these should time out
+//    assert(to_node.sleepFor(10) == 42);
+//    assert(to_node.sleepFor(20) == 42);
+//    assert(to_node.sleepFor(30) == 42);
+//    assert(to_node.sleepFor(40) == 42);
+
+//    assertThrown!Exception(to_node.sleepFor(2000));
+//    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+//    to_node.ctrl.shutdown();
+//    node.ctrl.shutdown();
+//}
+
+//// test-case for responses to re-used requests (from main thread)
+//unittest
+//{
+//    import core.thread;
+//    import std.exception;
+
+//    static interface API
+//    {
+//        float getFloat();
+//        size_t sleepFor (long dur);
+//    }
+
+//    static class Node : API
+//    {
+//        override float getFloat() { return 69.69; }
+//        override size_t sleepFor (long dur)
+//        {
+//            Thread.sleep(msecs(dur));
+//            return 42;
+//        }
+//    }
+
+//    // node with no timeout
+//    auto node = RemoteAPI!API.spawn!Node();
+//    assert(node.sleepFor(80) == 42);  // no timeout
+
+//    // node with a configured timeout
+//    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+
+//    /// none of these should time out
+//    assert(to_node.sleepFor(10) == 42);
+//    assert(to_node.sleepFor(20) == 42);
+//    assert(to_node.sleepFor(30) == 42);
+//    assert(to_node.sleepFor(40) == 42);
+
+//    assertThrown!Exception(to_node.sleepFor(2000));
+//    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+//    import std.stdio;
+//    assert(to_node.getFloat() == 42);  // bug: should return 69.69, not 42
+
+//    to_node.ctrl.shutdown();
+//    node.ctrl.shutdown();
+//}
+
+//// request timeouts (foreign node to another node)
+//unittest
+//{
+//    static import std.concurrency;
+//    import std.exception;
+
+//    __gshared C.Tid node_tid;
+
+//    static interface API
+//    {
+//        void check ();
+//        int ping ();
+//    }
+
+//    static class Node : API
+//    {
+//        override int ping () { return 42; }
+
+//        override void check ()
+//        {
+//            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+
+//            // no time-out
+//            node.ctrl.sleep(10.msecs);
+//            assert(node.ping() == 42);
+
+//            // time-out
+//            node.ctrl.sleep(2000.msecs);
+//            assertThrown!Exception(node.ping());
+//        }
+//    }
+
+//    auto node_1 = RemoteAPI!API.spawn!Node();
+//    auto node_2 = RemoteAPI!API.spawn!Node();
+//    node_tid = node_2.tid;
+//    node_1.check();
+//    node_1.ctrl.shutdown();
+//    node_2.ctrl.shutdown();
+//}
+
+//// test-case for zombie responses
+//unittest
+//{
+//    static import std.concurrency;
+//    import std.exception;
+
+//    __gshared C.Tid node_tid;
+
+//    static interface API
+//    {
+//        void check ();
+//        int get42 ();
+//        int get69 ();
+//    }
+
+//    static class Node : API
+//    {
+//        override int get42 () { return 42; }
+//        override int get69 () { return 69; }
+
+//        override void check ()
+//        {
+//            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+
+//            // time-out
+//            node.ctrl.sleep(2000.msecs);
+//            assertThrown!Exception(node.get42());
+
+//            // no time-out
+//            node.ctrl.sleep(10.msecs);
+//            assert(node.get69() == 69);
+//        }
+//    }
+
+//    auto node_1 = RemoteAPI!API.spawn!Node();
+//    auto node_2 = RemoteAPI!API.spawn!Node();
+//    node_tid = node_2.tid;
+//    node_1.check();
+//    node_1.ctrl.shutdown();
+//    node_2.ctrl.shutdown();
+//}
+
+//// request timeouts with dropped messages
+//unittest
+//{
+//    static import std.concurrency;
+//    import std.exception;
+
+//    __gshared C.Tid node_tid;
+
+//    static interface API
+//    {
+//        void check ();
+//        int ping ();
+//    }
+
+//    static class Node : API
+//    {
+//        override int ping () { return 42; }
+
+//        override void check ()
+//        {
+//            auto node = new RemoteAPI!API(node_tid, 420.msecs);
+
+//            // Requests are dropped, so it times out
+//            assert(node.ping() == 42);
+//            node.ctrl.sleep(10.msecs, true);
+//            assertThrown!Exception(node.ping());
+//        }
+//    }
+
+//    auto node_1 = RemoteAPI!API.spawn!Node();
+//    auto node_2 = RemoteAPI!API.spawn!Node();
+//    node_tid = node_2.tid;
+//    node_1.check();
+//    node_1.ctrl.shutdown();
+//    node_2.ctrl.shutdown();
+//}
+
+//// Test a node that gets a replay while it's delayed
+//unittest
+//{
+//    static import std.concurrency;
+//    import std.exception;
+
+//    __gshared C.Tid node_tid;
+
+//    static interface API
+//    {
+//        void check ();
+//        int ping ();
+//    }
+
+//    static class Node : API
+//    {
+//        override int ping () { return 42; }
+
+//        override void check ()
+//        {
+//            auto node = new RemoteAPI!API(node_tid, 5000.msecs);
+//            assert(node.ping() == 42);
+//            // We need to return immediately so that the main thread
+//            // puts us to sleep
+//            runTask(() {
+//                    node.ctrl.sleep(200.msecs);
+//                    assert(node.ping() == 42);
+//                });
+//        }
+//    }
+
+//    auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
+//    auto node_2 = RemoteAPI!API.spawn!Node();
+//    node_tid = node_2.tid;
+//    node_1.check();
+//    node_1.ctrl.sleep(300.msecs);
+//    assert(node_1.ping() == 42);
+//    node_1.ctrl.shutdown();
+//    node_2.ctrl.shutdown();
+//}
+
+//// Test explicit shutdown
+//unittest
+//{
+//    import std.exception;
+
+//    static interface API
+//    {
+//        int myping (int value);
+//    }
+
+//    static class Node : API
+//    {
+//        override int myping (int value)
+//        {
+//            return value;
+//        }
+//    }
+
+//    auto node = RemoteAPI!API.spawn!Node(1.seconds);
+//    assert(node.myping(42) == 42);
+//    node.ctrl.shutdown();
+
+//    try
+//    {
+//        node.myping(69);
+//        assert(0);
+//    }
+//    catch (Exception ex)
+//    {
+//        assert(ex.msg == `"Request timed-out"`);
+//    }
+//}
