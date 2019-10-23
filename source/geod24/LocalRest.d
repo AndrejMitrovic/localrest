@@ -489,6 +489,11 @@ public void sleep (Duration timeout)
     cond.wait(timeout);
 }
 
+unittest
+{
+    import std.stdio;
+    runTask(() => writeln("What is going on"));
+}
 
 /*******************************************************************************
 
@@ -1000,6 +1005,7 @@ public final class RemoteAPI (API) : API
         }
 }
 
+version (none):
 /// Simple usage example
 unittest
 {
