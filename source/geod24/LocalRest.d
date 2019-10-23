@@ -342,6 +342,14 @@ private final class LocalScheduler : BaseFiberScheduler
     import core.sync.condition;
     import core.sync.mutex;
 
+    /// whether it's the main thread scheduler
+    public const bool is_main;
+
+    public this (bool is_main = false)
+    {
+        this.is_main = is_main;
+    }
+
     /// Just a FiberCondition with a state
     private struct Waiting { FiberCondition c; bool busy; }
 
@@ -444,9 +452,10 @@ private final class LocalScheduler : BaseFiberScheduler
 /// However, the one in `std.concurrency` is process-global (`__gshared`)
 private LocalScheduler scheduler;
 
-/// Whether this is the main thread
-private bool is_main_thread;
-
+shared static this ()
+{
+    scheduler = new LocalScheduler(true);
+}
 
 /*******************************************************************************
 
@@ -938,13 +947,6 @@ public final class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
-                    // we are in the main thread
-                    if (scheduler is null)
-                    {
-                        scheduler = new LocalScheduler;
-                        is_main_thread = true;
-                    }
-
                     // `std.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {
@@ -956,7 +958,7 @@ public final class RemoteAPI (API) : API
 
                         // for the main thread, we run the "event loop" until
                         // the request we're interested in receives a response.
-                        if (is_main_thread)
+                        if (scheduler.is_main)
                         {
                             bool terminated = false;
                             runTask(() {
