@@ -87,6 +87,24 @@ import std.traits : Parameters, ReturnType;
 import core.thread;
 import core.time;
 
+/// By deafult we use a virtual clock.
+/// The time in a virtualclock is advanced to the
+/// next timer's fire time
+class VirtualClock
+{
+    static VirtualTimer opCall ()
+    {
+        __gshared VirtualTimer instance;
+
+        synchronized
+        {
+            if (instance is null)
+                instance = new VirtualTimer();
+        }
+
+        return instance;
+    }
+}
 
 /// Data sent by the caller
 private struct Command
@@ -630,7 +648,7 @@ public final class RemoteAPI (API) : API
         import std.range;
 
         scope node = new Implementation(cargs);
-        scheduler = new LocalScheduler;
+        scheduler = new LocalScheduler(VirtualTimer());
         scope exc = new Exception("You should never see this exception - please report a bug");
 
         // very simple & limited variant, to keep it performant.
@@ -941,7 +959,7 @@ public final class RemoteAPI (API) : API
                     // we are in the main thread
                     if (scheduler is null)
                     {
-                        scheduler = new LocalScheduler;
+                        scheduler = new LocalScheduler(VirtualTimer());
                         is_main_thread = true;
                     }
 
