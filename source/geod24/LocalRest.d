@@ -343,7 +343,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         string file = __FILE__, size_t line = __LINE__)
     {
         auto childTid = C.spawn(&spawned!(Impl), file, line, args);
-        stderr.writefln("tid %s started node %s", C.thisTid(),
+        stderr.writefln("%s(%s) tid %s started node %s", file, line, C.thisTid(),
                 childTid);
         return new RemoteAPI(childTid, timeout);
     }
@@ -438,7 +438,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         nothrow
     {
         scope (failure) assert(0);
-        stderr.writefln("tid %s was created", C.thisTid());
+        //stderr.writefln("tid %s was created", C.thisTid());
 
         import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
@@ -564,7 +564,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     }
 
     /// Where to send message to
-    private C.Tid childTid;
+    public C.Tid childTid;
 
     /// Timeout to use when issuing requests
     private const Duration timeout;
