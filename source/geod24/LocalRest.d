@@ -498,7 +498,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 while (1)
                 {
                     static size_t req_count;
-                    C.receiveTimeout(self, req_count, 10.msecs,
+                    C.receiveTimeout(self, req_count++, 10.msecs,
                         (ShutdownCommand!API e)
                         {
                             if (e.callback !is null)
@@ -783,11 +783,12 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                         // the request we're interested in receives a response.
                         if (is_main_thread)
                         {
+                            static size_t req_id;
                             bool terminated = false;
                             runTask(() {
                                 while (!terminated)
                                 {
-                                    C.receiveTimeout(C.thisTid(), 10.msecs,
+                                    C.receiveTimeout(C.thisTid(), req_id++, 10.msecs,
                                         (Response res) {
                                             scheduler.pending = res;
                                             scheduler.waiting[res.id].c.notify();
