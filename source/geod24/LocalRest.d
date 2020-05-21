@@ -343,6 +343,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         string file = __FILE__, size_t line = __LINE__)
     {
         auto childTid = C.spawn(&spawned!(Impl), file, line, args);
+        stderr.writefln("tid %s started node %s", C.thisTid(),
+                childTid);
         return new RemoteAPI(childTid, timeout);
     }
 
