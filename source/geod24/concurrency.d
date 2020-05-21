@@ -497,7 +497,7 @@ bool trySend(T...)(Tid tid, T vals)
  * the `Variant` will contain a $(REF Tuple, std,typecons) of all values
  * sent.
  */
-void receive(T...)(Tid self, T ops )
+void receive(T...)(Tid self, size_t req_id, T ops )
 in
 {
     assert(self.mbox !is null,
@@ -507,7 +507,7 @@ in
 do
 {
     checkops( ops );
-    self.mbox.getUntimed(ops);
+    self.mbox.getUntimed(req_id, ops);
 }
 
 ///
@@ -1066,9 +1066,9 @@ package class MessageBox
      *  true if a message was retrieved and false if not (such as if a
      *  timeout occurred).
      */
-    bool getUntimed(Ops...)(scope Ops ops)
+    bool getUntimed(Ops...)(size_t req_id, scope Ops ops)
     {
-        return this.get(Duration.init, ops);
+        return this.get(req_id, Duration.init, ops);
     }
 
     bool get(Ops...)(size_t req_id, Duration period, scope Ops ops)
