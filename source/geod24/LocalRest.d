@@ -442,7 +442,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         nothrow
     {
         scope (failure) assert(0);
-        writefln("tid %s was created", this_thread_tid);
+        stderr.writefln("tid %s was created", this_thread_tid);
 
         import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
@@ -512,7 +512,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                     C.receiveTimeout(self, req_count++, file, line, 10.msecs,
                         (ShutdownCommand!API e)
                         {
-                            writefln("tid %s received shutdown", this_thread_tid);
+                            stderr.writefln("tid %s received shutdown", this_thread_tid);
 
                             if (e.callback !is null)
                                 e.callback(node);
@@ -641,7 +641,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         public void shutdown (void function (API) callback = null)
             @trusted
         {
-            writefln("tid %s sending shutdown to %s", this_thread_tid,
+            stderr.writefln("tid %s sending shutdown to %s", this_thread_tid,
                 this.childTid);
 
             C.send(this.childTid, ShutdownCommand!API(callback));
