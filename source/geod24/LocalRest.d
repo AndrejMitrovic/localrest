@@ -338,7 +338,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
     public static RemoteAPI spawn (Impl) (
         CtorParams!Impl args, Duration timeout = Duration.init,
-        string file = __FILE__, int line = __LINE__)
+        string file = __FILE__, size_t line = __LINE__)
     {
         auto childTid = C.spawn(&spawned!(Impl), file, line, args);
         return new RemoteAPI(childTid, timeout);
@@ -430,7 +430,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     ***************************************************************************/
 
     private static void spawned (Implementation) (
-        C.Tid self, string file, int line, CtorParams!Implementation cargs)
+        C.Tid self, string file, size_t line, CtorParams!Implementation cargs)
         nothrow
     {
         import std.datetime.systime : Clock, SysTime;
