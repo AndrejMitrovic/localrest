@@ -699,7 +699,7 @@ do
  * $(REF Duration, core,time) has passed. It returns `true` if it received a
  * message and `false` if it timed out waiting for one.
  */
-bool receiveTimeout(T...)(Tid self, Duration duration, T ops)
+bool receiveTimeout(T...)(Tid self, size_t req_id, Duration duration, T ops)
 in
 {
     assert(self.mbox !is null,
@@ -708,7 +708,7 @@ in
 do
 {
     checkops(ops);
-    return self.mbox.get(duration, ops);
+    return self.mbox.get(req_id, duration, ops);
 }
 
 @safe unittest
@@ -1071,7 +1071,7 @@ package class MessageBox
         return this.get(Duration.init, ops);
     }
 
-    bool get(Ops...)(Duration period, scope Ops ops)
+    bool get(Ops...)(size_t req_id, Duration period, scope Ops ops)
     {
         immutable timedWait = period !is Duration.init;
         MonoTime limit = timedWait ? MonoTime.currTime + period : MonoTime.init;

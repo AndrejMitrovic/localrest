@@ -497,7 +497,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
             scheduler.start(() {
                 while (1)
                 {
-                    C.receiveTimeout(self, 10.msecs,
+                    static size_t req_count;
+                    C.receiveTimeout(self, req_count, 10.msecs,
                         (ShutdownCommand!API e)
                         {
                             if (e.callback !is null)
