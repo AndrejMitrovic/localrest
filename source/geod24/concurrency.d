@@ -998,24 +998,20 @@ protected:
 private:
     void dispatch()
     {
-        import std.algorithm.mutation : remove;
+        import std.algorithm;
 
-        while (m_fibers.length > 0)
+        while (m_fibers.any!(fiber => fiber.state != Fiber.State.TERM))
         {
-            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null)
+            if (m_fibers[m_pos].state != Fiber.State.TERM)
             {
-                throw t;
+                auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+                if (t !is null)
+                    throw t;
             }
-            if (m_fibers[m_pos].state == Fiber.State.TERM)
-            {
-                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
-                    m_pos = 0;
-            }
-            else if (m_pos++ >= m_fibers.length - 1)
-            {
+
+            m_pos++;
+            if (m_pos >= m_fibers.length)
                 m_pos = 0;
-            }
         }
     }
 
