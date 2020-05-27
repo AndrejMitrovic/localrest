@@ -278,6 +278,18 @@ public void runTask (scope void delegate() dg)
     scheduler.spawn(dg);
 }
 
+/*******************************************************************************
+
+    Ditto, but schedule the task, don't run it immediately.
+
+*******************************************************************************/
+
+public void scheduleTask (scope void delegate() dg)
+{
+    assert(scheduler !is null, "Cannot call this function from the main thread");
+    scheduler.schedule(dg);
+}
+
 /// Ditto
 public void sleep (Duration timeout)
 {
