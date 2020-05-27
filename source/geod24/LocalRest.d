@@ -832,8 +832,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         static foreach (ovrld; __traits(getOverloads, API, member))
         {
             mixin(q{
-                override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
+                override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params) @trusted
                 {
+                    import core.stdc.time;
+                    import std.format;
+
                     // we are in the main thread
                     if (scheduler is null)
                     {
@@ -841,17 +844,21 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                         is_main_thread = true;
                     }
 
+                    auto serialized = S.serialize(ArgWrapper!(Parameters!ovrld)(params));
+
+                    auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof,
+                                           SerializedData(serialized));
+
+                    auto start_time = time(null);
+
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {
-                        auto serialized = S.serialize(ArgWrapper!(Parameters!ovrld)(params));
-
-                        auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof,
-                                               SerializedData(serialized));
 
                         // If the node already shut down, its MessageBox will be
                         // closed. Detect it and notify the user.
                         // Note that it might be expected that the remote died.
+                        start_time = time(null);
                         if (!C.trySend(this.childTid, command))
                             throw new Exception("Connection with peer closed");
 
@@ -890,7 +897,14 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                         throw new Exception(res.data.get!string);
 
                     if (res.status == Status.Timeout)
-                        throw new Exception("Request timed-out");
+                    {
+                        //throw new Exception("Request timed-out");
+                        //writeln("--- REQUEST TIMED OUT");
+                        //writefln("--- REQUEST %s timed-out. Command: %s",
+                        //    this.childTid, command);
+                        throw new Exception(format("Request to %s (started at %s) timed-out at %s. Command: %s",
+                            this.childTid, start_time, time(null), command));
+                    }
 
                     static if (!is(ReturnType!(ovrld) == void))
                         return S.deserialize!(typeof(return))(res.data.getS!S());
@@ -1749,7 +1763,7 @@ unittest
     }
     catch (Exception ex)
     {
-        assert(ex.msg == "Request timed-out");
+        assert(ex.msg.canFind("timed-out"));
     }
 }
 
