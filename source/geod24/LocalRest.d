@@ -106,6 +106,11 @@ import std.traits : Parameters, ReturnType;
 import core.thread;
 import core.time;
 
+/// Send by the child to its parent when the node constructor finished
+private struct CtorComplete
+{
+
+}
 
 /// Data sent by the caller
 private struct Command
@@ -387,7 +392,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         CtorParams!Impl args, Duration timeout = Duration.init,
         string file = __FILE__, int line = __LINE__)
     {
-        auto childTid = C.spawn(&spawned!(Impl), file, line, args);
+        import std.stdio;
+        auto childTid = C.spawn(&spawned!(Impl), C.thisTid(), file, line, args);
+        writeln("Waiting for CtorComplete..");
+        C.receiveOnly!CtorComplete(C.thisTid());
+        writeln("Received CtorComplete..");
         return new RemoteAPI(childTid, timeout);
     }
 
@@ -470,6 +479,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
        Params:
            Implementation = Type of the implementation to instantiate
            self = The channel on which to "listen" to receive new "connections"
+           parent = the parent thread which spawned us
            file = Path to the file that spawned this node
            line = Line number in the `file` that spawned this node
            cargs = Arguments to `Implementation`'s constructor
@@ -477,9 +487,10 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     ***************************************************************************/
 
     private static void spawned (Implementation) (
-        C.Tid self, string file, int line, CtorParams!Implementation cargs)
+        C.Tid self, C.Tid parent, string file, int line, CtorParams!Implementation cargs)
         nothrow
     {
+        import std.stdio;
         import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
         import std.range;
@@ -535,7 +546,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         void runNode ()
         {
+            import std.stdio;
+            writeln("Constructing..");
             scope node = new Implementation(cargs);
+            writeln("Sending CtorComplete..");
+            C.send(parent, CtorComplete.init);
             scheduler = new LocalScheduler;
 
             void handle (T)(T arg)
