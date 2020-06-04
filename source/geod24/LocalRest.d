@@ -198,10 +198,7 @@ private final class LocalScheduler : C.FiberScheduler
     import core.sync.mutex;
 
     /// Just a FiberCondition with a state
-    private struct Waiting { FiberCondition c; bool busy; }
-
-    /// The 'Response' we are currently processing, if any
-    private Response pending;
+    private struct Waiting { Response pending; FiberCondition c; bool busy; }
 
     /// Request IDs waiting for a response
     private Waiting[ulong] waiting;
@@ -215,8 +212,11 @@ private final class LocalScheduler : C.FiberScheduler
 
     public Response waitResponse (size_t id, Duration duration) nothrow
     {
+        //this.pending.id = id;
+        import std.stdio;
+
         if (id !in this.waiting)
-            this.waiting[id] = Waiting(new FiberCondition, false);
+            this.waiting[id] = Waiting(Response(Status.Failed, id), new FiberCondition, false);
 
         Waiting* ptr = &this.waiting[id];
         if (ptr.busy)
@@ -228,12 +228,19 @@ private final class LocalScheduler : C.FiberScheduler
         if (duration == Duration.init)
             ptr.c.wait();
         else if (!ptr.c.wait(duration))
-            this.pending = Response(Status.Timeout, this.pending.id);
+            this.waiting[id].pending = Response(Status.Timeout, id);
+
+        import core.stdc.stdlib : abort;
+        if (this.waiting[id].pending.id != id)
+        {
+            printf("--- UNEXPECTED Unexpected %d vs %d\n", this.waiting[id].pending.id, id);
+            abort();
+        }
 
         ptr.busy = false;
         // After control returns to us, `pending` has been filled
-        scope(exit) this.pending = Response.init;
-        return this.pending;
+        //scope(exit) this.pending = Response.init;
+        return this.waiting[id].pending;
     }
 
     /// Called when a waiting condition was handled and can be safely removed
@@ -531,7 +538,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 }
                 else static if (is(T == Response))
                 {
-                    scheduler.pending = arg;
+                    scheduler.waiting[arg.id].pending = arg;
                     scheduler.waiting[arg.id].c.notify();
                     scheduler.remove(arg.id);
                 }
@@ -891,7 +898,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                 {
                                     C.receiveTimeout(C.thisTid(), 10.msecs,
                                         (Response res) {
-                                            scheduler.pending = res;
+                                            scheduler.waiting[res.id].pending = res;
                                             scheduler.waiting[res.id].c.notify();
                                         });
 
@@ -924,6 +931,86 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 });
         }
 }
+
+/// Support for circular nodes call
+version (none) unittest
+{
+    static import geod24.concurrency;
+    import std.format;
+
+    __gshared C.Tid[string] tbn;
+
+    static interface API
+    {
+        @safe:
+        public ulong call (ulong count, ulong val);
+        public void setNext (string name);
+        public void setPrev (string name);
+    }
+
+    static class Node : API
+    {
+        int i;
+        this (int i) { this.i = i; }
+
+        @trusted:
+        public override ulong call (ulong count, ulong val)
+        {
+            Thread.sleep(100.msecs);
+            if (!count)
+                return val;
+
+            this.i++;
+            if (this.i > 3)
+                this.i = 0;
+
+            if (this.i == 0)
+                return this.next.call(count - 1, val + count);
+            else
+                return this.prev.call(count - 1, val + count);
+        }
+
+        public override void setPrev (string name) @trusted
+        {
+            this.prev = new RemoteAPI!API(tbn[name], 10.msecs);
+        }
+
+        public override void setNext (string name) @trusted
+        {
+            this.next = new RemoteAPI!API(tbn[name], 10.msecs);
+        }
+
+        private API prev;
+        private API next;
+    }
+
+    RemoteAPI!(API)[3] nodes = [
+        RemoteAPI!API.spawn!Node(1),
+        RemoteAPI!API.spawn!Node(2),
+        RemoteAPI!API.spawn!Node(3),
+    ];
+
+    foreach (idx, ref api; nodes)
+        tbn[format("node%d", idx)] = api.tid();
+    nodes[0].setPrev("node2");
+    nodes[0].setNext("node1");
+
+    nodes[1].setPrev("node1");
+    nodes[1].setNext("node2");
+
+    nodes[2].setNext("node0");
+    nodes[2].setPrev("node1");
+
+    import std.stdio;
+    writeln(nodes[0].call(20, 0));
+
+    import std.algorithm;
+    nodes.each!(node => node.ctrl.shutdown());
+    thread_joinAll();
+}
+
+
+version (none):
 
 /// Simple usage example
 unittest
