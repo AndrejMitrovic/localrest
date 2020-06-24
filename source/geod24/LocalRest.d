@@ -227,8 +227,27 @@ private final class LocalScheduler : C.FiberScheduler
 
         if (duration == Duration.init)
             ptr.c.wait();
-        else if (!ptr.c.wait(duration))
-            this.pending = Response(Status.Timeout, this.pending.id);
+        else
+        {
+            import std.stdio;
+            scope (failure) assert(0);
+            import std.datetime.systime;
+            auto start_time = Clock.currTime();
+
+            auto cond = ptr.c.wait(duration);
+            if (!cond)
+            {
+                //writefln("Fiber timed out at %s (%s delay. response delay: %s)",
+                //    Clock.currTime, Clock.currTime - start_time, Clock.currTime - ptr.c.notify_time);
+                this.pending = Response(Status.Timeout, this.pending.id);
+            }
+            else
+            {
+                //if (Clock.currTime() - start_time > duration)
+                //writefln("Fiber notified at %s and responded at %s (%s response delay. %s requested timeout)",
+                //    ptr.c.notify_time, Clock.currTime, Clock.currTime - ptr.c.notify_time, duration);
+            }
+        }
 
         ptr.busy = false;
         // After control returns to us, `pending` has been filled

@@ -947,22 +947,28 @@ protected:
             import core.time : MonoTime;
 
             scope (exit) notified = false;
-
             for (auto limit = MonoTime.currTime + period;
                  !notified && !period.isNegative;
                  period = limit - MonoTime.currTime)
             {
                 FiberScheduler.yield();
             }
+            notify_time = Clock.currTime;
             return notified;
         }
 
+
+        import std.datetime.systime;
         void notify() nothrow
         {
+            assert(!notified);
+            notify_time = Clock.currTime;
             notified = true;
             FiberScheduler.yield();
         }
 
+
+        public SysTime notify_time;
         private bool notified;
     }
 
@@ -970,10 +976,25 @@ private:
     void dispatch()
     {
         import std.algorithm.mutation : remove;
+        import std.datetime.systime;
 
+        SysTime start_time;
+        start_time = Clock.currTime();
         while (m_fibers.length > 0)
         {
+            if (m_pos == 0)
+                start_time = Clock.currTime();
+
+            import std.stdio;
+
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+            //writefln("Fiber [%s/%s] completed in %s", m_pos, m_fibers.length,
+            //        Clock.currTime - start_time);
+
+            if (m_pos != 0 && Clock.currTime - start_time > 1.seconds)
+                writefln("Total running time of dispatch [%s..%s] %s",
+                    m_pos, m_fibers.length, Clock.currTime - start_time);
+
             if (t !is null)
             {
                 throw t;
@@ -981,7 +1002,9 @@ private:
             if (m_fibers[m_pos].state == Fiber.State.TERM)
             {
                 if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
+                {
                     m_pos = 0;
+                }
             }
             else if (m_pos++ >= m_fibers.length - 1)
             {
