@@ -969,6 +969,7 @@ protected:
 private:
     void dispatch()
     {
+        import core.memory;
         import std.algorithm.mutation : remove;
 
         while (m_fibers.length > 0)
@@ -980,6 +981,8 @@ private:
             }
             if (m_fibers[m_pos].state == Fiber.State.TERM)
             {
+                //destroy(m_fibers[m_pos]);
+                //GC.collect();
                 if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
                     m_pos = 0;
             }
