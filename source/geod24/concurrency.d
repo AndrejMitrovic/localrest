@@ -980,6 +980,7 @@ private:
             }
             if (m_fibers[m_pos].state == Fiber.State.TERM)
             {
+                destroy(m_fibers[m_pos]);
                 if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
                     m_pos = 0;
             }
