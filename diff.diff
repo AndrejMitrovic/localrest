@@ -1,0 +1,104 @@
+diff --git a/source/geod24/LocalRest.d b/source/geod24/LocalRest.d
+index 6719fe6..966aa24 100644
+--- a/source/geod24/LocalRest.d
++++ b/source/geod24/LocalRest.d
+@@ -110,16 +110,23 @@ import std.traits : fullyQualifiedName, Parameters, ReturnType;
+ import core.thread;
+ import core.time;
+ 
++struct ID
++{
++    /// A node may restart, in which case it will spawn a new request scheduler
++    size_t sched_id;
++
++    /// In order to support re-entrancy, every request contains an id
++    /// which should be copied in the `Response`
++    /// Initialized to `size_t.max` so not setting it crashes the program
++    size_t id = size_t.max;
++}
+ 
+ /// Data sent by the caller
+ private struct Command
+ {
+     /// Tid of the sender thread (cannot be JSON serialized)
+     C.Tid sender;
+-    /// In order to support re-entrancy, every request contains an id
+-    /// which should be copied in the `Response`
+-    /// Initialized to `size_t.max` so not setting it crashes the program
+-    size_t id = size_t.max;
++    ID id;
+     /// Method to call
+     string method;
+     /// Serialized arguments to the method
+@@ -180,7 +187,7 @@ private struct Response
+     /// which should be copied in the `Response` so the scheduler can
+     /// properly dispatch this event
+     /// Initialized to `size_t.max` so not setting it crashes the program
+-    size_t id;
++    ID id;
+     /// If `status == Status.Success`, the serialized return value.
+     /// Otherwise, it contains `Exception.toString()`.
+     SerializedData data;
+@@ -220,16 +227,25 @@ private final class LocalScheduler : C.FiberScheduler
+     private Response pending;
+ 
+     /// Request IDs waiting for a response
+-    private Waiting[ulong] waiting;
++    private Waiting[ID] waiting;
++
++    /// scheduler ID
++    private size_t sched_id;
++
++    public this () @safe @nogc nothrow
++    {
++        static size_t last_idx;
++        this.sched_id = last_idx++;
++    }
+ 
+     /// Get the next available request ID
+-    public size_t getNextResponseId ()
++    public ID getNextResponseId ()
+     {
+         static size_t last_idx;
+-        return last_idx++;
++        return ID(this.sched_id, last_idx++);
+     }
+ 
+-    public Response waitResponse (size_t id, Duration duration) nothrow
++    public Response waitResponse (ID id, Duration duration) nothrow
+     {
+         if (id !in this.waiting)
+             this.waiting[id] = Waiting(new FiberCondition, false);
+@@ -253,7 +269,7 @@ private final class LocalScheduler : C.FiberScheduler
+     }
+ 
+     /// Called when a waiting condition was handled and can be safely removed
+-    public void remove (size_t id)
++    public void remove (ID id)
+     {
+         this.waiting.remove(id);
+     }
+@@ -266,7 +282,6 @@ private LocalScheduler scheduler;
+ /// Whether this is the main thread
+ private bool is_main_thread;
+ 
+-
+ /*******************************************************************************
+ 
+     Provide eventloop-like functionalities
+@@ -588,6 +603,15 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
+                 }
+                 else static if (is(T == Response))
+                 {
++                    // response for a previous LocalScheduler instance
++                    if (arg.id.sched_id != scheduler.sched_id)
++                    {
++                        import std.stdio;
++                        writefln("Outdated request for sched ID %s (current is %s)",
++                            arg.id.sched_id, scheduler.sched_id);
++                        return;
++                    }
++
+                     scheduler.pending = arg;
+                     scheduler.waiting[arg.id].c.notify();
+                     scheduler.remove(arg.id);
