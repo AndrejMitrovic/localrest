@@ -2157,6 +2157,68 @@ unittest
     thread_joinAll();
 }
 
+/// Test restarting a node that has responses waiting for it
+unittest
+{
+    import core.atomic : atomicLoad, atomicStore;
+    static interface API
+    {
+        @safe:
+        public void call0 ();
+        public void call1 ();
+    }
+
+    __gshared C.Tid node2Addr;
+    static shared bool done;
+
+    static class Node : API
+    {
+        @trusted:
+
+        public override void call0 ()
+        {
+            scope node2 = new RemoteAPI!API(node2Addr);
+            node2.call1();
+        }
+
+        public override void call1 ()
+        {
+            // when this event runs we know call1() has already returned
+            scheduler.schedule({ atomicStore(done, true); });
+        }
+    }
+
+    auto node1 = RemoteAPI!API.spawn!Node(500.msecs);
+    auto node2 = RemoteAPI!API.spawn!Node();
+    node2Addr = node2.ctrl.tid();
+    node2.ctrl.sleep(2.seconds, false);
+
+    try
+    {
+        node1.call0();
+        assert(0, "This should have timed out");
+    }
+    catch (Exception e) {}
+
+    node1.ctrl.restart();
+
+    // after a while node 1 will receive a response to the timed-out request
+    // to call1(), but the node restarted and is no longer interested in this
+    // request (the request map / LocalScheduler is different)
+    // crashes because we cannot know which scheduler the response belongs to.
+    size_t count;
+    while (!atomicLoad(done))
+    {
+        assert(count < 300);  // up to 3 seconds wait
+        count++;
+        Thread.sleep(10.msecs);
+    }
+
+    node1.ctrl.shutdown();
+    node2.ctrl.shutdown();
+    thread_joinAll();
+}
+
 unittest
 {
     import geod24.concurrency;
