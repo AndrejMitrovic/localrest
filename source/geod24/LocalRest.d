@@ -110,16 +110,24 @@ import std.traits : fullyQualifiedName, Parameters, ReturnType;
 import core.thread;
 import core.time;
 
+/// Request / Response ID
+private struct ID
+{
+    /// A node may restart, in which case it will spawn a new request scheduler
+    size_t sched_id;
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response`
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id = size_t.max;
+}
 
 /// Data sent by the caller
 private struct Command
 {
     /// Tid of the sender thread (cannot be JSON serialized)
     C.Tid sender;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id = size_t.max;
+    /// ID used for request re-entrancy (See ID definition)
+    ID id;
     /// Method to call
     string method;
     /// Serialized arguments to the method
@@ -176,11 +184,8 @@ private struct Response
 {
     /// Final status of a request (failed, timeout, success, etc)
     Status status;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
+    /// ID used for request re-entrancy (See ID definition)
+    ID id;
     /// If `status == Status.Success`, the serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     SerializedData data;
@@ -220,16 +225,26 @@ private final class LocalScheduler : C.FiberScheduler
     private Response pending;
 
     /// Request IDs waiting for a response
-    private Waiting[ulong] waiting;
+    private Waiting[ID] waiting;
 
-    /// Get the next available request ID
-    public size_t getNextResponseId ()
+    /// scheduler ID
+    private size_t sched_id;
+
+    /// Initialize this scheduler and its unique ID
+    public this () @safe @nogc nothrow
     {
         static size_t last_idx;
-        return last_idx++;
+        this.sched_id = last_idx++;
     }
 
-    public Response waitResponse (size_t id, Duration duration) nothrow
+    /// Get the next available request ID
+    public ID getNextResponseId ()
+    {
+        static size_t last_idx;
+        return ID(this.sched_id, last_idx++);
+    }
+
+    public Response waitResponse (ID id, Duration duration) nothrow
     {
         if (id !in this.waiting)
             this.waiting[id] = Waiting(new FiberCondition, false);
@@ -253,7 +268,7 @@ private final class LocalScheduler : C.FiberScheduler
     }
 
     /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
+    public void remove (ID id)
     {
         this.waiting.remove(id);
     }
@@ -588,6 +603,10 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 }
                 else static if (is(T == Response))
                 {
+                    // response for a previous LocalScheduler instance
+                    if (arg.id.sched_id != scheduler.sched_id)
+                        return;
+
                     scheduler.pending = arg;
                     scheduler.waiting[arg.id].c.notify();
                     scheduler.remove(arg.id);
@@ -2204,8 +2223,7 @@ unittest
 
     // after a while node 1 will receive a response to the timed-out request
     // to call1(), but the node restarted and is no longer interested in this
-    // request (the request map / LocalScheduler is different)
-    // crashes because we cannot know which scheduler the response belongs to.
+    // request (the request map / LocalScheduler is different), so it's filtered
     size_t count;
     while (!atomicLoad(done))
     {
