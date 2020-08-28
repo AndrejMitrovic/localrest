@@ -593,20 +593,83 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         void runNode ()
         {
             scope node = new Implementation(cargs);
-            scheduler = new LocalScheduler;
 
             // Control the node behavior
             Control control;
+
+            /// Schedules and processes requests with a single fiber
+            class RequestQueue
+            {
+                import std.container.dlist;
+
+                /// The list of active requests
+                private DList!Command requests;
+
+                /// Whether the working task is running
+                /// It's started lazily on first call to schedule()
+                private bool is_running;
+
+                /***************************************************************************
+
+                    Start the event handling by the fiber spawned in the constructor.
+
+                    The fiber will continue issuing requests scheduled via `schedule` and
+                    will only terminate itself when `stop` is called.
+
+                ***************************************************************************/
+
+                private void run () @trusted
+                {
+                    while (1)  // may run forever, MainFiber has shutdown mechanism instead
+                    {
+                        if (this.requests.empty)
+                        {
+                            C.FiberScheduler.yield();
+                            continue;
+                        }
+
+                        auto command = this.requests.front;
+                        this.requests.removeFront();
+                        handleCommand(command, node, control.filter);
+                    }
+                }
+
+                /***************************************************************************
+
+                    Schedule a request
+
+                    Params:
+                        callback = the callback which will be invoked to start the request
+
+                ***************************************************************************/
+
+                public void schedule (ref Command command) @trusted nothrow
+                {
+                    this.requests.insertBack(command);
+
+                    if (!this.is_running)
+                    {
+                        this.is_running = true;
+                        runTask(&this.run);
+                    }
+                }
+            }
+
+            scheduler = new LocalScheduler;
 
             // we need to keep track of messages which were ignored when
             // node.sleep() was used, and then handle each message in sequence.
             Variant[] await_msgs;
 
+            RequestQueue[C.Tid] req_queue_map;
+
             void handle (T)(T arg)
             {
                 static if (is(T == Command))
                 {
-                    scheduler.spawn(() => handleCommand(arg, node, control.filter));
+                    auto req_queue = req_queue_map.require(arg.sender,
+                        new RequestQueue());
+                    req_queue.schedule(arg);
                 }
                 else static if (is(T == Response))
                 {
@@ -621,6 +684,32 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 else static assert(0, "Unhandled type: " ~ T.stringof);
             }
 
+            // we have 1 event loop fiber and 1 worker fiber.
+            // the reason they're kept separate is because we don't want to
+            // block the event loop fiber. If we directly handled requests
+            // in the main fiber then this could happen:
+            //
+            // MainFiber: call node.receiveEnvelope()
+            // MainFiber: code calls Yield
+            // fiber scheduler handles other fibers.. goes back to MainFiber
+            // MainFiber: still blocked waiting for some data, again Yielded
+            // but then the node would fail to handle any other events.
+            // Having MainFiber and WorkFiber:
+            // The WorkFiber is spawned *per node*. We add identification to
+            // each connected node via the Registry.
+            // We still have the issue of the WorkFiber itself potentially getting
+            // stuck on a single event, and never processing any other events,
+            // even if the MainThread still processes thread messages and
+            // adds items to the workload - those items will not be processed
+            // if the WorkThread keeps waking up but is still not ready to
+            // proceed and is constantly yielded - stuck processing one single
+            // event.
+            // However, we could also admit that a WorkThread stuck on a single
+            // request on a *particular node* means that other request would
+            // likely get stuck too - so what is the point of running several
+            // worker sub-fibers?
+            // The WorkFiber could itself start multiple Fibers, and only handle
+            // up to X concurrent fibers (to unblock processing)
             scheduler.start(() {
                 while (1)
                 {
@@ -990,6 +1079,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                         }
                         else
                         {
+                            // this is the thread & fiber of the node that issued the request.
+                            // so why don't we suspend *this* fiber?
                             return scheduler.waitResponse(command.id, this.timeout);
                         }
                     }();
