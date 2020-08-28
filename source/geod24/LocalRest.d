@@ -302,6 +302,13 @@ private bool is_main_thread;
 
 public void runTask (void delegate() dg) nothrow
 {
+    static int count;
+    ++count;
+    import std.stdio;
+    scope (failure) assert(0);
+
+    if (!is_main_thread)
+        writefln("Task count: %s", count);
     assert(scheduler !is null, "Cannot call this function from the main thread");
     scheduler.spawn(dg);
 }
